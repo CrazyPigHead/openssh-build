@@ -1,0 +1,32 @@
+# This is the ssh client system-wide configuration file.
+# OpenSSH 10.5p1 local build for Kylin V10 (OpenSSL 4.0.2 statically linked).
+
+Include /etc/ssh/ssh_config.d/*.conf
+
+Host *
+#   ForwardAgent no
+#   ForwardX11 no
+#   ForwardX11Trusted yes
+    PasswordAuthentication yes
+#   HostbasedAuthentication no
+#   BatchMode no
+#   CheckHostIP no
+#   AddressFamily any
+#   ConnectTimeout 0
+#   StrictHostKeyChecking ask
+#   IdentityFile ~/.ssh/id_rsa
+#   IdentityFile ~/.ssh/id_ecdsa
+#   IdentityFile ~/.ssh/id_ed25519
+#   IdentityFile ~/.ssh/id_ecdsa_sk
+#   IdentityFile ~/.ssh/id_ed25519_sk
+#   Port 22
+#   Ciphers aes128-ctr,aes192-ctr,aes256-ctr
+#   MACs hmac-sha2-256,hmac-sha2-512
+#   EscapeChar ~
+#   Tunnel no
+#   TunnelDevice any:any
+#   PermitLocalCommand no
+#   RekeyLimit 1G 1h
+    SendEnv LANG LC_*
+    HashKnownHosts yes
+    KbdInteractiveAuthentication no

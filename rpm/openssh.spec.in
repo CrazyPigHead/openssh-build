@@ -1,0 +1,328 @@
+# =============================================================================
+# OpenSSH RPM spec 模板 —— 由 rpm/build.sh 在构建时生成 openssh.spec
+#
+# 占位符(@NAME@ 形式)在构建时以 versions/<版本>.env 的值替换;
+# @WITH_SSHD_SESSION@ / @WITH_SSHD_AUTH@ 由源码树探测结果置 0/1
+# (sshd-session 自 9.8 引入,sshd-auth 自 9.9 引入)。
+#
+# 默认面向 Kylin Linux Advanced Server V10 (Lance):
+#   目标环境:x86_64 / glibc 2.28 / systemd 243 / rpm 4.15.1
+#   构建基底:Rocky Linux 8(glibc 2.28,与目标一致,产物仅引用 <= GLIBC_2.28 符号)
+#   调整目标发行版时同步 RPM_RELEASE 与 GLIBC 符号上限(构建脚本 GLIBC_MAX)
+#
+# 链接策略(与 deb 构建一致,安装时几乎不依赖系统组件库):
+#   静态内嵌:OpenSSL(libcrypto)、zlib、libcbor、libfido2、libedit(+ libtinfo)
+#   保持动态:glibc、libpam、libaudit、libselinux、libcrypt、libudev(仅
+#             ssh-sk-helper)—— 全部为目标系统必装基础库
+#
+# 布局与 Kylin 原生 openssh 包对齐(升级即原地替换,配置 noreplace 保留):
+#   openssh          /usr/bin/{ssh-add,ssh-agent,ssh-keygen,ssh-keyscan},
+#                    /usr/libexec/{ssh-keysign,ssh-pkcs11-helper,ssh-sk-helper},
+#                    /etc/ssh/moduli
+#   openssh-clients  /usr/bin/{ssh,scp,sftp,ssh-copy-id}, /etc/ssh/ssh_config
+#   openssh-server   /usr/sbin/sshd, /usr/libexec/{sshd-session,sshd-auth,
+#                    sftp-server}, /etc/ssh/sshd_config, /etc/pam.d/sshd,
+#                    sshd.service, /var/empty/sshd
+#   另增 /usr/libexec/openssh/sftp-server 兼容软链:现存 Kylin 服务器上的
+#   sshd_config 将 Subsystem 指向该路径(原系统中此文件缺失,升级后即修复)。
+#
+# 三处静态链接顺序修正(缺一不可,来源:deb 构建实测):
+#   1) LIBEDIT 追加 -ltinfo(静态 libedit 的 termcap 符号需在其后解析)
+#   2) CHANNELLIBS 追加 -ldl -lpthread(静态 libcrypto 的 dso_dlfcn.o /
+#      threads_pthread.o 符号需在 -lcrypto 之后解析)
+#   3) libfido2.pc 的 Requires 补 libudev libcbor(完整静态链)
+#
+# 教训:spec 注释里绝不能出现宏的字面写法(RPM 对注释行同样做宏展开,
+# 会吞掉真正的调用参数);本文件注释已规避。
+# =============================================================================
+%define debug_package %{nil}
+%define _binary_payload w6.xzdio
+%define _source_payload w6.xzdio
+
+%global openssl_ver @OPENSSL_VER@
+%global zlib_ver @ZLIB_VER@
+%global cbor_ver @CBOR_VER@
+%global fido2_ver @FIDO2_VER@
+%global libedit_ver @LIBEDIT_VER@
+%global ncurses_ver @NCURSES_VER@
+# 拆分二进制探测结果(0/1),由构建脚本依据源码树置入
+%global with_sshd_session @WITH_SSHD_SESSION@
+%global with_sshd_auth @WITH_SSHD_AUTH@
+
+Name:           openssh
+Version:        @OPENSSH_VER@
+Release:        @RPM_RELEASE@
+Summary:        An open source implementation of SSH protocol version 2
+License:        BSD
+URL:            https://www.openssh.com/
+# Kylin 现网遗留 openssh-help(8.2p1)noarch 包拥有全部 man page,与本包冲突;
+# 升级事务经 Obsoletes 自动移除之,man 页由本包(版本更高)接管
+Obsoletes:      openssh-help < %{version}-%{release}
+Source0:        https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-%{version}.tar.gz
+Source1:        https://github.com/openssl/openssl/releases/download/openssl-%{openssl_ver}/openssl-%{openssl_ver}.tar.gz
+Source2:        https://github.com/madler/zlib/releases/download/v%{zlib_ver}/zlib-%{zlib_ver}.tar.gz
+# 注意:Source3/Source4 不写 URL——GitHub tags 链接的 basename(v0.14.0.tar.gz
+# 等)与本地文件名不同,rpmbuild 会按 URL basename 查找 SOURCES 而失败
+Source3:        libcbor-%{cbor_ver}.tar.gz
+Source4:        libfido2-%{fido2_ver}.tar.gz
+Source5:        https://www.thrysoee.dk/editline/libedit-%{libedit_ver}.tar.gz
+Source6:        https://ftp.gnu.org/pub/gnu/ncurses/ncurses-%{ncurses_ver}.tar.gz
+Source10:       sshd.service
+Source11:       sshd.pam
+Source12:       ssh_config
+Source13:       sshd_config
+
+BuildRequires:  gcc gcc-c++ make pkgconfig perl perl-IPC-Cmd perl-Data-Dumper
+BuildRequires:  cmake gnupg2 cpio file binutils
+BuildRequires:  pam-devel libselinux-devel audit-libs-devel libxcrypt-devel
+BuildRequires:  systemd-devel
+
+%description
+OpenSSH (OpenBSD Secure Shell) ported to Linux. This build embeds the
+whole crypto stack statically: OpenSSL %{openssl_ver}, zlib %{zlib_ver},
+libcbor %{cbor_ver}, libfido2 %{fido2_ver} and libedit %{libedit_ver},
+so the packages do not depend on the system OpenSSL/zlib/libfido2
+runtime libraries. Only core base-system libraries (glibc, PAM, audit,
+selinux, libcrypt, udev) are used dynamically.
+
+%package clients
+Summary:        An open source SSH client applications
+Requires:       openssh = %{version}-%{release}
+
+%description clients
+OpenSSH clients: ssh, scp, sftp, ssh-copy-id and the system-wide client
+configuration file. Crypto stack (OpenSSL %{openssl_ver} etc.) is
+statically linked, no system libcrypto/libz runtime dependency.
+
+%package server
+Summary:        An open source SSH server daemon
+Requires:       openssh = %{version}-%{release}
+
+%description server
+OpenSSH server daemon (sshd) with the sshd-session/sshd-auth split
+binaries required by modern OpenSSH, the external sftp-server, a PAM
+integration file and a systemd service unit. Crypto stack (OpenSSL
+%{openssl_ver} etc.) is statically linked, no system libcrypto/libz
+runtime dependency.
+
+%prep
+%setup -q
+cd %{_builddir}
+tar -xf %{SOURCE1}
+tar -xf %{SOURCE2}
+tar -xf %{SOURCE3}
+tar -xf %{SOURCE4}
+tar -xf %{SOURCE5}
+tar -xf %{SOURCE6}
+
+%build
+PFX=%{_builddir}/local-prefix
+J=%{?_smp_mflags}
+
+# ---- OpenSSL(libcrypto 静态;自测由外部构建脚本/彩排承担功能门禁)
+cd %{_builddir}/openssl-%{openssl_ver}
+./Configure no-shared no-zlib -fPIC --prefix="$PFX/openssl" --openssldir=/etc/ssl
+make $J
+make install_sw
+test -f "$PFX/openssl/lib64/libcrypto.a"
+
+# ---- zlib
+cd %{_builddir}/zlib-%{zlib_ver}
+CFLAGS="-O2 -fPIC" ./configure --static --prefix="$PFX/zlib"
+make $J && make install
+
+# ---- libcbor
+cd %{_builddir}/libcbor-%{cbor_ver}
+rm -rf cb && mkdir cb && cd cb
+cmake -DCMAKE_INSTALL_PREFIX="$PFX/cbor" -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DWITH_EXAMPLES=OFF \
+  -DCMAKE_BUILD_TYPE=Release ..
+make $J && make install
+
+# ---- ncurses(静态 libtinfo;EL8 无任何静态 ncurses/tinfo,必须自建。
+#      运行期 terminfo 数据用系统 /usr/share/terminfo,不重复安装数据库)
+cd %{_builddir}/ncurses-%{ncurses_ver}
+CFLAGS="-O2 -fPIC" ./configure --prefix="$PFX/ncurses" \
+  --disable-shared --enable-static --with-termlib --enable-overwrite \
+  --without-debug --without-ada --without-manpages --disable-db-install \
+  --with-terminfo-dirs=/usr/share/terminfo:/lib/terminfo \
+  --with-default-terminfo-dir=/usr/share/terminfo
+make $J && make install
+# ncurses 默认 widec,静态产物带 w 后缀(libtinfow.a/libncursesw.a);
+# 补无后缀软链,使 -ltinfo/-lncurses 的链接查找可用
+ln -sf libtinfow.a "$PFX/ncurses/lib/libtinfo.a"
+ln -sf libncursesw.a "$PFX/ncurses/lib/libncurses.a"
+test -f "$PFX/ncurses/lib/libtinfow.a"
+
+# ---- libedit
+cd %{_builddir}/libedit-%{libedit_ver}
+CFLAGS="-O2 -fPIC" CPPFLAGS="-I$PFX/ncurses/include" LDFLAGS="-L$PFX/ncurses/lib" \
+  ./configure --prefix="$PFX/libedit" --enable-static --disable-shared
+make $J && make install
+
+# ---- libfido2(经 pkg-config 自选 openssl/cbor/zlib;需 libudev 头)
+cd %{_builddir}/libfido2-%{fido2_ver}
+rm -rf fb && mkdir fb && cd fb
+PKG_CONFIG_PATH="$PFX/cbor/lib/pkgconfig:$PFX/cbor/lib64/pkgconfig:$PFX/openssl/lib64/pkgconfig:$PFX/zlib/lib/pkgconfig" \
+cmake -DCMAKE_INSTALL_PREFIX="$PFX/fido2" -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release \
+  -DFIDO_EXAMPLES=OFF -DFIDO_TESTING=OFF -DBUILD_MANPAGES=OFF ..
+make $J fido2
+cmake --install . || true
+test -f "$PFX"/fido2/lib/libfido2.a || test -f "$PFX"/fido2/lib64/libfido2.a
+PCF="$(ls "$PFX"/fido2/lib*/pkgconfig/libfido2.pc)"
+# 链接顺序修正 3:补全静态依赖链
+sed -i 's/^Requires: libcrypto$/Requires: libcrypto libudev libcbor/' "$PCF"
+
+# ---- OpenSSH(libexecdir=/usr/libexec、privsep=/var/empty/sshd 与 Kylin 原生一致)
+cd %{_builddir}/openssh-%{version}
+export PKG_CONFIG_PATH="$PFX/fido2/lib/pkgconfig:$PFX/fido2/lib64/pkgconfig:$PFX/cbor/lib/pkgconfig:$PFX/cbor/lib64/pkgconfig:$PFX/openssl/lib64/pkgconfig:$PFX/libedit/lib/pkgconfig:$PFX/zlib/lib/pkgconfig"
+# 注意:LIBS/LDFLAGS 必须独立 export —— configure 宏展开为多命令序列,
+# 行首环境前缀无法传入。
+export LIBS="-ltinfo -lpthread"
+export LDFLAGS="-L$PFX/ncurses/lib"
+%configure \
+  --with-ssl-dir="$PFX/openssl" --with-zlib="$PFX/zlib" \
+  --sysconfdir=%{_sysconfdir}/ssh --libexecdir=%{_libexecdir} \
+  --with-privsep-path=/var/empty/sshd --with-pid-dir=/run \
+  --with-pam --with-libedit --with-selinux --with-audit=linux \
+  --with-security-key-builtin --with-xauth=/usr/bin/xauth \
+  --with-default-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  --with-mantype=doc --disable-strip
+# 链接顺序修正 1/2(EL8 的 pkgconf --libs 输出带尾随空格,模式需空白容差)
+sed -i "s|^LIBEDIT=\(.*\)-ledit[[:space:]]*$|LIBEDIT=\1-ledit -ltinfo|" Makefile
+sed -i 's|^CHANNELLIBS=-lcrypto[[:space:]]*-lz[[:space:]]*$|CHANNELLIBS=-lcrypto -lz -ldl -lpthread|' Makefile
+grep -q -- "-ledit -ltinfo" Makefile
+grep -q -- "CHANNELLIBS=-lcrypto -lz -ldl -lpthread" Makefile
+make $J
+
+V_OUT=$(./ssh -V 2>&1); echo "$V_OUT"
+echo "$V_OUT" | grep -q "OpenSSH_%{version}, OpenSSL %{openssl_ver}"
+
+%install
+rm -rf $RPM_BUILD_ROOT
+cd %{_builddir}/openssh-%{version}
+%make_install
+
+# strip(保留动态符号表)
+for f in ssh scp sftp ssh-add ssh-agent ssh-keygen ssh-keyscan \
+         ssh-keysign ssh-pkcs11-helper ssh-sk-helper \
+         sshd sshd-session sshd-auth sftp-server; do
+  strip --strip-unneeded "$RPM_BUILD_ROOT/usr/bin/$f" 2>/dev/null \
+    || strip --strip-unneeded "$RPM_BUILD_ROOT/usr/sbin/$f" 2>/dev/null \
+    || strip --strip-unneeded "$RPM_BUILD_ROOT/usr/libexec/$f" 2>/dev/null \
+    || true
+done
+
+# 以定制配置替换 make install 的默认件
+install -m 644 %{SOURCE12} $RPM_BUILD_ROOT%{_sysconfdir}/ssh/ssh_config
+install -m 644 %{SOURCE13} $RPM_BUILD_ROOT%{_sysconfdir}/ssh/sshd_config
+
+# PAM(内容与 Kylin V10 现网 /etc/pam.d/sshd 一致)
+install -D -m 644 %{SOURCE11} $RPM_BUILD_ROOT%{_sysconfdir}/pam.d/sshd
+
+# systemd 单元(Type=simple:上游 sshd 无 sd_notify,Kylin 原机上的
+# Type=notify 单元针对其打过补丁的 sshd,不能用于本构建)
+install -D -m 644 %{SOURCE10} $RPM_BUILD_ROOT%{_unitdir}/sshd.service
+
+# ssh-copy-id
+install -m 755 contrib/ssh-copy-id $RPM_BUILD_ROOT%{_bindir}/ssh-copy-id
+install -m 644 contrib/ssh-copy-id.1 $RPM_BUILD_ROOT%{_mandir}/man1/ssh-copy-id.1
+
+# 兼容软链:现网 sshd_config 的 Subsystem 指向 /usr/libexec/openssh/sftp-server
+mkdir -p $RPM_BUILD_ROOT%{_libexecdir}/openssh
+ln -s ../sftp-server $RPM_BUILD_ROOT%{_libexecdir}/openssh/sftp-server
+
+mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/ssh/sshd_config.d
+mkdir -p $RPM_BUILD_ROOT/var/empty/sshd
+
+%files
+/usr/bin/ssh-add
+/usr/bin/ssh-agent
+/usr/bin/ssh-keygen
+/usr/bin/ssh-keyscan
+%attr(4511, root, root) /usr/libexec/ssh-keysign
+/usr/libexec/ssh-pkcs11-helper
+/usr/libexec/ssh-sk-helper
+%config(noreplace) %{_sysconfdir}/ssh/moduli
+%{_mandir}/man1/ssh-add.1*
+%{_mandir}/man1/ssh-agent.1*
+%{_mandir}/man1/ssh-keygen.1*
+%{_mandir}/man1/ssh-keyscan.1*
+%{_mandir}/man5/moduli.5*
+%{_mandir}/man8/ssh-keysign.8*
+%{_mandir}/man8/ssh-pkcs11-helper.8*
+%{_mandir}/man8/ssh-sk-helper.8*
+
+%files clients
+%config(noreplace) %{_sysconfdir}/ssh/ssh_config
+/usr/bin/scp
+/usr/bin/sftp
+/usr/bin/ssh
+/usr/bin/ssh-copy-id
+%{_mandir}/man1/scp.1*
+%{_mandir}/man1/sftp.1*
+%{_mandir}/man1/ssh.1*
+%{_mandir}/man1/ssh-copy-id.1*
+%{_mandir}/man5/ssh_config.5*
+
+%files server
+%config(noreplace) %{_sysconfdir}/ssh/sshd_config
+%dir %{_sysconfdir}/ssh/sshd_config.d
+%config(noreplace) %{_sysconfdir}/pam.d/sshd
+%{_sbindir}/sshd
+%if %{with_sshd_session}
+%{_libexecdir}/sshd-session
+%endif
+%if %{with_sshd_auth}
+%{_libexecdir}/sshd-auth
+%endif
+%{_libexecdir}/sftp-server
+%{_libexecdir}/openssh/sftp-server
+%{_unitdir}/sshd.service
+%attr(0711, root, root) %dir /var/empty/sshd
+%{_mandir}/man5/sshd_config.5*
+%{_mandir}/man8/sshd.8*
+%{_mandir}/man8/sftp-server.8*
+
+%pre -n openssh-server
+# 特权分离用户(Kylin 现网已存在 uid 74 的 sshd 用户,此为空操作)
+getent passwd sshd >/dev/null 2>&1 || \
+  useradd -r -M -d /var/empty/sshd -s /sbin/nologin \
+  -c "Privilege-separated SSH" sshd || :
+
+%post -n openssh-server
+# 生成缺失的主机密钥
+if [ ! -e /etc/ssh/sshd_not_to_be_run ]; then
+  /usr/bin/ssh-keygen -A >/dev/null 2>&1 || :
+fi
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  if [ "$1" -eq 1 ]; then
+    # 全新安装:启用并尝试启动
+    systemctl daemon-reload >/dev/null 2>&1 || :
+    systemctl enable sshd.service >/dev/null 2>&1 || :
+    systemctl start sshd.service >/dev/null 2>&1 || :
+  elif [ "$1" -ge 2 ]; then
+    # 升级:重载单元定义并温和重启(既有会话不受影响)
+    systemctl daemon-reload >/dev/null 2>&1 || :
+    systemctl try-restart sshd.service >/dev/null 2>&1 || :
+  fi
+fi
+
+%preun -n openssh-server
+if [ "$1" -eq 0 ] && [ -d /run/systemd/system ] && \
+   command -v systemctl >/dev/null 2>&1; then
+  systemctl disable --now sshd.service >/dev/null 2>&1 || :
+fi
+
+%postun -n openssh-server
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload >/dev/null 2>&1 || :
+fi
+
+%changelog
+* @CHANGELOG_DATE@ Local OpenSSH build <root@localhost> - @OPENSSH_VER@-@RPM_RELEASE@
+- Automated build via openssh-build toolchain
+- OpenSSL @OPENSSL_VER@ / zlib / libcbor / libfido2 / libedit statically embedded
+- File layout aligned with target distribution native openssh packages for
+  in-place upgrade; adds /usr/libexec/openssh/sftp-server compat symlink
