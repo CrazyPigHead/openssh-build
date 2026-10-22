@@ -55,6 +55,7 @@ openssh-build/
 ├── downloads/          物料缓存:自动下载落盘于此;预放物料即可离线构建
 ├── work/               构建缓存(--cache 时挂载进容器做增量构建)
 ├── out/                产物输出(out/archive/ 为历史归档)
+├── scripts/            目标机一键安装工具(自动识别 deb/rpm 系、版本门禁、保留现有配置)
 └── docs/               历史文档(构建纪要、handoff、上游调研)
 ```
 
@@ -161,6 +162,17 @@ SKIP_OPENSSL_TEST=0 ./build.sh deb  # 容器内跑 OpenSSL 官方自测(默认�
 ```
 
 ## 安装产物
+
+推荐用一键安装工具(自动识别 deb/rpm 系;已装版本不低于新包时提醒跳过;
+非交互;保留现有配置;装后自动重启 sshd,无 systemd 环境自动跳过):
+
+```bash
+scripts/install_openssh.sh 10.6p1                    # 缺省依次找:脚本同目录 → out/<deb|rpm>/<版本>-*
+scripts/install_openssh.sh 10.6p1 --dir /path/to/pkgs  # 离线场景:三包与脚本拷至同一目录
+```
+
+也可手工安装(deb 三包互相锁版本,须同事务安装;--force-confold 用于覆盖
+官方包时保留原 sshd_config):
 
 ```bash
 # deb(三包互相锁版本,须同事务安装;--force-confold 用于覆盖官方包时保留原 sshd_config)
