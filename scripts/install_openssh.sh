@@ -27,6 +27,9 @@
 #   - 版本门禁:设备已装 openssh 低于要安装的版本才安装;已装同版本或
 #     更高版本时打印提醒并跳过(退出码 0);
 #   - 非交互:deb 设 DEBIAN_FRONTEND=noninteractive,全程无 tty 询问;
+#   - 安装通道:deb 系优先 apt(缺依赖能自动补、记账完整),confold/
+#     overwrite 透传 dpkg;apt-get check 发现系统已有坏依赖时改走
+#     dpkg -i 直装绕开 apt 的全系统体检;apt 失败不重试(后端同为 dpkg);
 #   - 配置保留:deb 用 --force-confold,现网已修改的 /etc/ssh/* 原样保留,
 #     包内新配置落 .dpkg-dist;rpm 靠 spec 的 %config(noreplace),
 #     新配置落 .rpmnew;
@@ -134,11 +137,21 @@ install_deb() {
     echo "当前未安装 openssh-server,将执行全新安装"
   fi
 
-  # 非交互安装(env 前缀保证变量穿透 sudo)
-  $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
-    apt-get install -y --allow-downgrades \
-    -o Dpkg::Options::="--force-confold" \
-    "${debs[@]}"
+  # 安装通道:系统依赖健康走 apt;apt 因全系统体检拒装时用 dpkg 直装绕开。
+  # 两通道都带 --force-overwrite,用于接管旧布局包(带 openssh-common 等)
+  # 占用的文件;apt 安装失败不回退重试——apt 后端就是 dpkg,同样的包换
+  # dpkg 再跑不会有不同结果,只会留下半装状态,失败就带完整报错退出
+  if $SUDO apt-get check >/dev/null 2>&1; then
+    $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+      apt-get install -y --allow-downgrades \
+      -o Dpkg::Options::="--force-confold" \
+      -o Dpkg::Options::="--force-overwrite" \
+      "${debs[@]}"
+  else
+    echo "提示: 系统存在未满足的依赖(apt-get check 未通过),跳过 apt 直接 dpkg 安装"
+    $SUDO env DEBIAN_FRONTEND=noninteractive \
+      dpkg -i --force-confold --force-overwrite "${debs[@]}"
+  fi
   echo "安装完成:"
   dpkg-query -W -f='  ${Package} ${Version}\n' openssh-client openssh-sftp-server openssh-server
 }

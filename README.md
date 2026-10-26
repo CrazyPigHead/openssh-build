@@ -164,7 +164,8 @@ SKIP_OPENSSL_TEST=0 ./build.sh deb  # 容器内跑 OpenSSL 官方自测(默认�
 ## 安装产物
 
 推荐用一键安装工具(自动识别 deb/rpm 系;已装版本不低于新包时提醒跳过;
-非交互;保留现有配置;装后自动重启 sshd,无 systemd 环境自动跳过):
+非交互;系统带坏依赖时自动改走 dpkg 直装;保留现有配置;装后自动重启
+sshd,无 systemd 环境自动跳过):
 
 ```bash
 scripts/install_openssh.sh 10.6p1                    # 缺省依次找:脚本同目录 → out/<deb|rpm>/<版本>-*
